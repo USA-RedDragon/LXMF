@@ -208,54 +208,64 @@ def job_linux(stamp_cost, workblock, message_id):
         rounds_queue.put(rounds)
     
     job_procs = []
-    RNS.log(f"Starting {jobs} stamp generation workers", RNS.LOG_DEBUG)
-    for jpn in range(jobs):
-        process = multiprocessing.get_context("fork").Process(target=job, kwargs={"stop_event": stop_event, "pn": jpn, "sc": stamp_cost, "wb": workblock}, daemon=True)
-        job_procs.append(process)
-        process.start()
-
-    active_jobs[message_id] = [stop_event, result_queue]
-
-    stamp = result_queue.get()
-
-    # Collect any potential spurious
-    # results from worker queue.
     try:
-        while True: result_queue.get_nowait()
-    except: pass
+        RNS.log(f"Starting {jobs} stamp generation workers", RNS.LOG_DEBUG)
+        for jpn in range(jobs):
+            process = multiprocessing.get_context("fork").Process(target=job, kwargs={"stop_event": stop_event, "pn": jpn, "sc": stamp_cost, "wb": workblock}, daemon=True)
+            job_procs.append(process)
+            process.start()
 
-    for j in range(jobs):
-        nrounds = 0
+        active_jobs[message_id] = [stop_event, result_queue]
+
+        stamp = result_queue.get()
+
+        # Collect any potential spurious
+        # results from worker queue.
         try:
-            nrounds = rounds_queue.get(timeout=2)
-        except Exception as e:
-            RNS.log(f"Failed to get round stats part {j}: {e}", RNS.LOG_ERROR)
-        total_rounds += nrounds
+            while True: result_queue.get_nowait()
+        except: pass
 
-    all_exited = False
-    exit_timeout = time.time() + 5
-    while time.time() < exit_timeout:
-        if not any(p.is_alive() for p in job_procs):
-            all_exited = True
-            break
-        time.sleep(0.1)
+        for j in range(jobs):
+            nrounds = 0
+            try:
+                nrounds = rounds_queue.get(timeout=2)
+            except Exception as e:
+                RNS.log(f"Failed to get round stats part {j}: {e}", RNS.LOG_ERROR)
+            total_rounds += nrounds
 
-    if not all_exited:
-        RNS.log("Stamp generation IPC timeout, possible worker deadlock. Terminating remaining processes.", RNS.LOG_ERROR)
-        if allow_kill:
+        all_exited = False
+        exit_timeout = time.time() + 5
+        while time.time() < exit_timeout:
+            if not any(p.is_alive() for p in job_procs):
+                all_exited = True
+                break
+            time.sleep(0.1)
+
+        if not all_exited:
+            RNS.log("Stamp generation IPC timeout, possible worker deadlock. Terminating remaining processes.", RNS.LOG_ERROR)
+            if allow_kill:
+                for j in range(jobs):
+                    process = job_procs[j]
+                    process.kill()
+            else:
+                return None
+
+        else:
             for j in range(jobs):
                 process = job_procs[j]
-                process.kill()
-        else:
-            return None
+                process.join()
+                # RNS.log(f"Joined {j} / {process}", RNS.LOG_DEBUG) # TODO: Remove
 
-    else:
-        for j in range(jobs):
-            process = job_procs[j]
-            process.join()
-            # RNS.log(f"Joined {j} / {process}", RNS.LOG_DEBUG) # TODO: Remove
+        return stamp, total_rounds
 
-    return stamp, total_rounds
+    finally:
+        active_jobs.pop(message_id, None)
+        for q in (result_queue, rounds_queue):
+            try:
+                q.close()
+                q.join_thread()
+            except Exception:
+                pass
 
 def job_android(stamp_cost, workblock, message_id):
     # Semaphore support is flaky to non-existent on
